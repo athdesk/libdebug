@@ -737,13 +737,14 @@ class Debugger:
         """
         Continue the execution until the next breakpoint (or syscatch) is hitted or the program is stopped
         If syscatches are active, don't use blocking=False (will break on any syscall)
-        If a syscatch is hit, return value is syscall info: (sys_nr, args[6]); else it's None
+        If a syscatch is hit, return value is an array of syscall info: (sys_nr, args[6]); else it's None
         """
 
         #I need to execute at least another instruction otherwise I get always in the same bp
         self.step()
         self._set_breakpoints()
         self.running = True
+        catched = []
         # Probably should implement a timeout
         for tid, t in self.threads.items():
             if self.syscatches.get(tid) is not None and self.syscatches[tid] != []:
@@ -761,14 +762,16 @@ class Debugger:
                         t.pt_syscall() # execute the syscall
                         if sysno in self.syscatches[tid]:
                             logging.debug("hit a syscall catch")
-                            return info
+                            catched.append(info)
+                            break
             else:
                 t.cont()
+
         if blocking:
             self._wait_process()
             self._retore_breakpoints()
             logging.debug("Continue Stopped")
-        return None
+        return None if catched == [] else catched
 
     def finish(self, blocking=True):
         """
