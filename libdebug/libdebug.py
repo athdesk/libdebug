@@ -249,6 +249,16 @@ class ThreadDebug():
         status = u32(buf[:4])
         logging.debug("[TID %d] waitpid status: %#x, ret: %d", self.tid, status, r)
         self.running = False
+        return status
+    
+    def _wait_trap(self):
+        while (True):
+            status = self._wait_process()
+            if WSTOPSIG(status) == 5:
+                return status
+            if WSTOPSIG(status) == 0x85:
+                return status
+            self.cont()
 
     def _stop_process(self):
         logging.debug("[TID %d] Stopping the process", self.tid)
@@ -378,7 +388,7 @@ class Debugger:
         self.reg_size = 8
         self.mem = Memory(self.peek, self.poke)
         self.breakpoints = {}
-        self.syscatches = []
+        self.syscatches = {}
         self.map = {}
         self.bases = {}
         self.terminal = ['tmux', 'splitw', '-h']
@@ -434,6 +444,7 @@ class Debugger:
         self._retrieve_maps()
         self._find_new_tids()
         self.running = False
+        return status
 
     def _stop_process(self):
         logging.debug("Stopping the process")
@@ -715,9 +726,18 @@ class Debugger:
             if self.rip == rip:
                 break
 
+    def _internal_await_syscall(self, t):
+        """
+        Wait for a syscall to happen on the given thread
+        """
+        t.pt_syscall()
+        return WSTOPSIG(t._wait_trap())
+            
     def cont(self, blocking=True):
         """
-        Continue the execution until the next breakpoint is hitted or the program is stopped
+        Continue the execution until the next breakpoint (or syscatch) is hitted or the program is stopped
+        If syscatches are active, don't use blocking=False (will break on any syscall)
+        If a syscatch is hit, return value is syscall info: (sys_nr, args[6]); else it's None
         """
 
         #I need to execute at least another instruction otherwise I get always in the same bp
@@ -726,11 +746,29 @@ class Debugger:
         self.running = True
         # Probably should implement a timeout
         for tid, t in self.threads.items():
-            t.cont()
+            if self.syscatches.get(tid) is not None and self.syscatches[tid] != []:
+                if (not blocking):
+                    logging.warning("Not blocking continue with syscatches may lead to undefined behaviour such as your computer catching fire and/or invoking demons from the underworld.")
+                    t.pt_syscall()
+                else:
+                    while (True):
+                        s = self._internal_await_syscall(t)
+                        if s == 5:
+                            logging.debug("hit a breakpoint, not a syscall")
+                            continue
+                        info = t.pt_getsyscallinfo()
+                        sysno = info[0]
+                        t.pt_syscall() # execute the syscall
+                        if sysno in self.syscatches[tid]:
+                            logging.debug("hit a syscall catch")
+                            return info
+            else:
+                t.cont()
         if blocking:
             self._wait_process()
             self._retore_breakpoints()
             logging.debug("Continue Stopped")
+        return None
 
     def finish(self, blocking=True):
         """
@@ -762,26 +800,34 @@ class Debugger:
         Stop on next syscall.
         If number is set, stop only on that syscall
         If tid is not set, the syscall is catched on main thread
-        If once is True, the program is stopped only on the next syscall
-            and other breakpoints are temporarily disabled
+        If once is True, the program is stopped only on the next syscall, else it acts like a breakpoint
         If step is False, the syscall is catched before the execution
             !!! IF USING THIS PLEASE DO step() OR cont() MANUALLY BEFORE CALLING syscatch() AGAIN !!!
-        Returns the number of the syscall catched
+        Returns syscall info like (nr, args[6]), or None if a breakpoint is hit (or if once=False)
         """
-        t = self.threads[self.pid if tid is None else tid]
+        tid = self.pid if tid is None else tid
+        t = self.threads[tid]
         
-        t.pt_syscall()
         if once:
+            t.pt_syscall() # next trap will be either a syscall or another BP
             t._wait_process()
             info = t.pt_getsyscallinfo()
+            if step:
+                t.step()
             if info is None:
-                raise DebugFail("Syscall info not found")
+                # this means we hit a breakpoint, not a syscall
+                return None
             return info
         else:
-            raise NotImplementedError("Not implemented yet")        
+            if number is None:
+                raise NotImplementedError("syscatch with number=None and once=False is not implemented (would be broken)")      
             if number not in self.syscatches:
                 logging.info("new syscall catch at %#x", number)
-                self.syscatches.append(number)
+                if self.syscatches.get(tid) is None:
+                    self.syscatches[tid] = []
+                self.syscatches[tid].append(number)
+        return None
+
 
     def _resolve_relative_address(self, addr, name):
         if name is None and self._check_mem_address(addr, warn=False):

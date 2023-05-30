@@ -2,6 +2,7 @@ from ctypes import CDLL, create_string_buffer, POINTER, c_void_p, c_int, c_long,
 import struct
 import logging
 import errno
+import time
 
 NULL = 0
 PTRACE_TRACEME = 0
@@ -214,27 +215,31 @@ class Ptrace():
     
     def syscall(self, tid):
         self.libc.ptrace.argtypes = self.args_int
+        set_errno(0)
         if (self.libc.ptrace(PTRACE_SYSCALL, tid, NULL, NULL) == -1):
-            raise PtraceFail("PtraceSyscall Failed. Do you have permissions? Running as sudo?")
+            time.sleep(0.01) # dirty hack, ptrace is kinda broken
+            # if (self.libc.ptrace(PTRACE_SYSCALL, tid, NULL, NULL) == -1):
+            #     err = get_errno()
+            #     raise PtraceFail(f"PtraceSyscall Failed with {err}. Do you have permissions? Running as sudo?")
         
     def get_syscall_info(self, tid):
         """
-        retval is a tuple of (syscall_id, syscall_args[6]) if entering syscall / seccomp trap
-        retval is (syscall_rval, junk[6]) if exiting syscall
+        retval is a tuple of (syscall_id, syscall_args[6], op) if entering syscall / seccomp trap
+        retval is (syscall_rval, junk[6], op) if exiting syscall
         """
         buf = create_string_buffer(128)
         for i in range(128):
             buf[i] = b"\x00"
         self.libc.ptrace.argtypes = self.args_ptr
         if (self.libc.ptrace(PTRACE_GET_SYSCALL_INFO, tid, 128, buf) == -1):
-            raise PtraceFail("GetSyscallInfo Failed. Do you have permissions? Running as sudo?")
+                raise PtraceFail("GetSyscallInfo Failed. Do you have permissions? Running as sudo?")
         
         if buf[0] == b"\x00": # PTRACE_SYSCALL_INFO_NONE
             return None
         else:
             id = struct.unpack("Q", buf[24:32])[0]
             args = struct.unpack("QQQQQQ", buf[32:80])
-            return (id, args)
+            return (id, args, int(buf[0][0]))
 
         # define PTRACE_SYSCALL_INFO_NONE	0
         # define PTRACE_SYSCALL_INFO_ENTRY	1
