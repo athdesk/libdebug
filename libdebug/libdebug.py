@@ -271,6 +271,21 @@ class ThreadDebug():
         self.running = True
         self.ptrace.singlestep(self.tid)
 
+    
+    def pt_syscall(self):
+        """
+        Execute until next syscall entry/exit
+        """
+        self.running = True
+        self.ptrace.syscall(self.tid)
+
+
+    def pt_getsyscallinfo(self):
+        """
+        Execute until next syscall entry/exit
+        """
+        return self.ptrace.get_syscall_info(self.tid)
+
 
     def cont(self):
         """
@@ -363,6 +378,7 @@ class Debugger:
         self.reg_size = 8
         self.mem = Memory(self.peek, self.poke)
         self.breakpoints = {}
+        self.syscatches = []
         self.map = {}
         self.bases = {}
         self.terminal = ['tmux', 'splitw', '-h']
@@ -443,8 +459,8 @@ class Debugger:
         return False
 
     def _option_setup(self):
-        #PTRACE_O_TRACEFORK, PTRACE_O_TRACEVFORK, PTRACE_O_TRACECLONE and PTRACE_O_TRACEEXIT
-        self.ptrace.setoptions(self.pid, PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXIT)
+        #PTRACE_O_TRACEFORK, PTRACE_O_TRACEVFORK, PTRACE_O_TRACECLONE, PTRACE_O_TRACEEXIT and PTRACE_O_TRACESYSGOOD
+        self.ptrace.setoptions(self.pid, PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXIT | PTRACE_O_TRACESYSGOOD)
 
     ### Attach/Detach
     def run(self, path, args=[], sleep=None):
@@ -740,6 +756,32 @@ class Debugger:
             logging.info("new BreakPoint at %#x", addr)
             self.breakpoints[addr] = None
         return addr
+    
+    def syscatch(self, number=None, once=True, tid=None, step=True):
+        """
+        Stop on next syscall.
+        If number is set, stop only on that syscall
+        If tid is not set, the syscall is catched on main thread
+        If once is True, the program is stopped only on the next syscall
+            and other breakpoints are temporarily disabled
+        If step is False, the syscall is catched before the execution
+            !!! IF USING THIS PLEASE DO step() OR cont() MANUALLY BEFORE CALLING syscatch() AGAIN !!!
+        Returns the number of the syscall catched
+        """
+        t = self.threads[self.pid if tid is None else tid]
+        
+        t.pt_syscall()
+        if once:
+            t._wait_process()
+            info = t.pt_getsyscallinfo()
+            if info is None:
+                raise DebugFail("Syscall info not found")
+            return info
+        else:
+            raise NotImplementedError("Not implemented yet")        
+            if number not in self.syscatches:
+                logging.info("new syscall catch at %#x", number)
+                self.syscatches.append(number)
 
     def _resolve_relative_address(self, addr, name):
         if name is None and self._check_mem_address(addr, warn=False):

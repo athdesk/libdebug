@@ -45,6 +45,8 @@ PTRACE_EVENT_EXEC        = 4
 PTRACE_EVENT_VFORK_DONE = 5,
 PTRACE_EVENT_EXIT        = 6
 
+PTRACE_GET_SYSCALL_INFO = 0x420e
+
 WNOHANG = 1
 
 
@@ -209,6 +211,57 @@ class Ptrace():
         if err == errno.EIO:
             raise PtraceFail("Peek User Failed. Are you accessing a valid address?")
         return data
+    
+    def syscall(self, tid):
+        self.libc.ptrace.argtypes = self.args_int
+        if (self.libc.ptrace(PTRACE_SYSCALL, tid, NULL, NULL) == -1):
+            raise PtraceFail("PtraceSyscall Failed. Do you have permissions? Running as sudo?")
+        
+    def get_syscall_info(self, tid):
+        """
+        retval is a tuple of (syscall_id, syscall_args[6]) if entering syscall / seccomp trap
+        retval is (syscall_rval, junk[6]) if exiting syscall
+        """
+        buf = create_string_buffer(128)
+        for i in range(128):
+            buf[i] = b"\x00"
+        self.libc.ptrace.argtypes = self.args_ptr
+        if (self.libc.ptrace(PTRACE_GET_SYSCALL_INFO, tid, 128, buf) == -1):
+            raise PtraceFail("GetSyscallInfo Failed. Do you have permissions? Running as sudo?")
+        
+        if buf[0] == b"\x00": # PTRACE_SYSCALL_INFO_NONE
+            return None
+        else:
+            id = struct.unpack("Q", buf[24:32])[0]
+            args = struct.unpack("QQQQQQ", buf[32:80])
+            return (id, args)
+
+        # define PTRACE_SYSCALL_INFO_NONE	0
+        # define PTRACE_SYSCALL_INFO_ENTRY	1
+        # define PTRACE_SYSCALL_INFO_EXIT	2
+        # define PTRACE_SYSCALL_INFO_SECCOMP	3
+        # struct ptrace_syscall_info {
+        #     __u8 op;	/* PTRACE_SYSCALL_INFO_* */
+        #     __u8 pad[3];
+        #     __u32 arch;
+        #     __u64 instruction_pointer;
+        #     __u64 stack_pointer;
+        #     union {
+        #         struct {
+        #             __u64 nr;
+        #             __u64 args[6];
+        #         } entry;
+        #         struct {
+        #             __s64 rval;
+        #             __u8 is_error;
+        #         } exit;
+        #         struct {
+        #             __u64 nr;
+        #             __u64 args[6];
+        #             __u32 ret_data;
+        #         } seccomp;
+        #     };
+        # };
 
 
 AMD64_REGS = ["r15", "r14", "r13", "r12", "rbp", "rbx", "r11", "r10", "r9", "r8", "rax", "rcx", "rdx", "rsi", "rdi", "orig_rax", "rip", "cs", "eflags", "rsp", "ss", "fs_base", "gs_base", "ds", "es", "fs", "gs"]
